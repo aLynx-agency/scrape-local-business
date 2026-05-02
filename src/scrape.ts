@@ -1,0 +1,238 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { Page } from "playwright";
+import { closeOpenedPages, connect } from "./chrome.ts";
+import { writeCsv } from "./csv.ts";
+import { findEmailsConcurrent } from "./email.ts";
+import { isBlocked, solveIfBlocked } from "./captcha.ts";
+import type { ScrapeResponse, SerpResult } from "./types.ts";
+
+const SCREENSHOT_DIR = "screenshots";
+const DATA_DIR = "data";
+const VIEWPORT_WIDTH = 1366;
+const RESULTS_PER_PAGE = 20;
+
+export async function scrape(query: string, maxPages = 5): Promise<ScrapeResponse> {
+  const id = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID().slice(0, 8)}`;
+  const { context } = await connect();
+  const page = await context.newPage();
+
+  try {
+    await page.setViewportSize({ width: VIEWPORT_WIDTH, height: 900 });
+
+    await mkdir(SCREENSHOT_DIR, { recursive: true });
+    await mkdir(DATA_DIR, { recursive: true });
+
+    const results: SerpResult[] = [];
+    const seenNames = new Set<string>();
+    let screenshotPath = join(SCREENSHOT_DIR, `${id}.png`);
+    let pagesScraped = 0;
+
+    for (let pageNum = 0; pageNum < maxPages; pageNum++) {
+      const start = pageNum * RESULTS_PER_PAGE;
+      const url =
+        `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=1&hl=en` +
+        (start > 0 ? `&start=${start}` : "");
+      console.log(`[scrape] page ${pageNum + 1}/${maxPages} — ${url}`);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await dismissConsent(page);
+
+      // Brief settle after navigation — human-like pause before "reading" the page.
+      // Also lets Google's instrumentation see a non-zero dwell before any DOM action.
+      await page.waitForTimeout(600 + Math.random() * 500);
+
+      // CAPTCHA / soft block check. If 2captcha key is set we try to solve.
+      if (isBlocked(page)) {
+        const solved = await solveIfBlocked(page);
+        if (!solved) {
+          console.log(`[scrape] blocked at page ${pageNum + 1}, cannot solve — stopping pagination`);
+          break;
+        }
+      }
+
+      try {
+        await page.waitForSelector("div.VkpGBb", { timeout: 10_000 });
+      } catch {
+        console.log(`[scrape] no cards on page ${pageNum + 1} — end of results`);
+        break;
+      }
+
+      const pageResults = await extractLocal(page);
+      if (pageResults.length === 0) {
+        console.log(`[scrape] zero usable results on page ${pageNum + 1} — stopping`);
+        break;
+      }
+
+      let added = 0;
+      for (const r of pageResults) {
+        if (seenNames.has(r.name)) continue; // dedupe across pages
+        seenNames.add(r.name);
+        r.position = results.length + 1;
+        results.push(r);
+        added++;
+      }
+      console.log(`[scrape] page ${pageNum + 1} added ${added} new prospects (total ${results.length})`);
+      pagesScraped++;
+
+      // Take screenshot only on page 1 — that's the outreach asset.
+      if (pageNum === 0) {
+        await captureTop5Screenshot(page, screenshotPath);
+      }
+
+      // Longer jittered delay between page loads — humans don't paginate every second.
+      // Range chosen to land between fast-but-impatient (2s) and casually-browsing (4.5s).
+      if (pageNum + 1 < maxPages) {
+        await page.waitForTimeout(2000 + Math.random() * 2500);
+      }
+    }
+
+    if (results.length === 0) {
+      throw new Error("scrape returned zero results — likely blocked on first page");
+    }
+    console.log(`[scrape] pagination done: ${pagesScraped} pages, ${results.length} prospects`);
+
+    await page.close();
+
+    // Email crawl across the entire accumulated list.
+    const { context: ctx } = await connect();
+    const emails = await findEmailsConcurrent(ctx, results, 5);
+    for (let i = 0; i < results.length; i++) results[i].email = emails[i];
+
+    const csvPath = join(DATA_DIR, `${id}.csv`);
+    await writeCsv(csvPath, results);
+
+    return {
+      id,
+      query,
+      timestamp: new Date().toISOString(),
+      screenshotPath,
+      csvPath,
+      results,
+    };
+  } finally {
+    if (!page.isClosed()) await page.close({ runBeforeUnload: false }).catch(() => {});
+    // Belt-and-suspenders: close any prospect tabs that didn't unwind their finally
+    // block cleanly. Brave should be at zero non-blank tabs after every request.
+    await closeOpenedPages();
+  }
+}
+
+async function captureTop5Screenshot(page: Page, screenshotPath: string): Promise<void> {
+  // Hide sponsored cards so visual rank matches data rank.
+  await page.evaluate(() => {
+    document.querySelectorAll("div.VkpGBb").forEach((card) => {
+      const a = card.querySelector("a.L48Cpd") as HTMLAnchorElement | null;
+      const href = a?.href ?? "";
+      if (/\/aclk\?|googleadservices/i.test(href)) {
+        (card as HTMLElement).style.display = "none";
+      }
+    });
+  });
+
+  // Force lazy-loaded ratings/snippets to render before measuring layout.
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(500);
+
+  // Crop top-of-page → start of 6th visible card (so top 5 are fully shown).
+  const visibleCards = await page.$$("div.VkpGBb:not([style*='display: none'])");
+  const cutoffCard = visibleCards[5];
+  let clip: { x: number; y: number; width: number; height: number } | undefined;
+  if (cutoffCard) {
+    const box = await cutoffCard.boundingBox();
+    if (box) clip = { x: 0, y: 0, width: VIEWPORT_WIDTH, height: Math.ceil(box.y - 4) };
+  } else if (visibleCards.length > 0) {
+    const lastBox = await visibleCards[visibleCards.length - 1].boundingBox();
+    if (lastBox) clip = { x: 0, y: 0, width: VIEWPORT_WIDTH, height: Math.ceil(lastBox.y + lastBox.height + 80) };
+  }
+  // `fullPage: true` is required alongside `clip`: without it, Playwright caps
+  // the screenshot at viewport height (900px), silently truncating the bottom.
+  await page.screenshot(clip ? { path: screenshotPath, fullPage: true, clip } : { path: screenshotPath, fullPage: true });
+}
+
+async function dismissConsent(page: Page): Promise<void> {
+  // Google EU consent dialog. Best-effort: clicking "Accept all" / "Reject all".
+  // Persistent user-data-dir means we only see this once per profile.
+  const candidates = [
+    'button:has-text("Accept all")',
+    'button:has-text("I agree")',
+    'button:has-text("Reject all")',
+    "#L2AGLb",
+  ];
+  for (const sel of candidates) {
+    const btn = page.locator(sel).first();
+    if (await btn.count()) {
+      try {
+        await btn.click({ timeout: 2000 });
+        await page.waitForLoadState("domcontentloaded");
+        return;
+      } catch {
+        // try next selector
+      }
+    }
+  }
+}
+
+async function extractLocal(page: Page): Promise<SerpResult[]> {
+  // Local Finder DOM (May 2026):
+  // - Each card is `div.VkpGBb` containing:
+  //     - `div.dbg0pd[role="heading"]` → business name
+  //     - `a.L48Cpd` → "Website" link (external URL we want)
+  //     - `a.VDgVie` → "Directions" link (Google Maps URL — fallback only)
+  // - Sponsored cards mix in at the top with the same VkpGBb wrapper, but their
+  //   website href routes through google.com/aclk or googleadservices.com.
+  //   Filter by URL pattern.
+  const raw = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll("div.VkpGBb"));
+    const out: { name: string; url: string; phone: string; snippet: string }[] = [];
+    const seen = new Set<string>();
+    for (const card of cards) {
+      const nameEl = card.querySelector("div.dbg0pd");
+      const name = (nameEl?.textContent ?? "").trim();
+      if (!name || seen.has(name)) continue;
+
+      // Skip cards without an exposed Website button. These are listings whose
+      // owner never added a website to their Google Business profile — clicking
+      // through to the side panel won't reveal one either, so they're useless
+      // for outreach (no site to email, no Lighthouse target).
+      const websiteEl = card.querySelector("a.L48Cpd") as HTMLAnchorElement | null;
+      if (!websiteEl?.href) continue;
+      const url = websiteEl.href;
+
+      // Sponsored detection: URL pattern catches most ads. Text-based fallback
+      // catches the rare case where the ad has a real-looking website href.
+      const isAd =
+        /\/aclk\?|googleadservices\.com|\/url\?.*adurl=/i.test(url) ||
+        /\b(?:gesponsord|sponsored|gesponsert|annonce)\b/i.test((card.textContent ?? "").slice(0, 30)) ||
+        /(mijn advertentiecentrum|my ad cent|mon centre publicitaire)/i.test(name);
+      if (isAd) continue;
+
+      seen.add(name);
+      const detailsEl = card.querySelector("div.rllt__details");
+      const detailsText = (detailsEl?.textContent ?? "").replace(/\s+/g, " ").trim();
+
+      // Phone: try international (`+32 487 65 99 45`), then Belgian local
+      // (`02 706 41 41` / `0487 65 99 45`). Negative-lookahead `(?!\d)` at the
+      // end prevents truncation when the phone runs into trailing text without
+      // a separator (Google's snippet text often does this).
+      const intlMatch = detailsText.match(/\+\d{1,3}[\s.\-]?\d[\d\s.\-]{5,15}\d(?!\d)/);
+      const localMatch = !intlMatch ? detailsText.match(/\b0\d[\d\s.\-]{6,12}\d(?!\d)/) : null;
+      const phone = (intlMatch?.[0] ?? localMatch?.[0] ?? "").replace(/\s+/g, " ").trim();
+
+      const snippet = detailsText.replace(name, "").trim().slice(0, 240);
+      out.push({ name, url, phone, snippet });
+    }
+    return out;
+  });
+
+  return raw.map((r, i) => ({
+    position: i + 1,
+    name: r.name,
+    url: r.url,
+    email: "",
+    phone: r.phone,
+    snippet: r.snippet,
+  }));
+}

@@ -1,0 +1,23 @@
+{
+  "name": "serp-scraper-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file=.env watch src/server.ts",
+    "start": "tsx --env-file=.env src/server.ts",
+    "typecheck": "tsc",
+    "chrome": "bash scripts/launch-chrome.sh",
+    "smoke": "tsx src/smoke.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "lighthouse": "^13.2.0",
+    "playwright": "^1.48.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
