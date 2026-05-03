@@ -32,9 +32,20 @@ export async function connect(): Promise<{ browser: Browser; context: BrowserCon
   // Google scraping past the first request, even with a residential proxy.
   await context.addInitScript({ content: STEALTH_INIT_SCRIPT });
 
-  // Match the Accept-Language we claim in navigator.languages so the HTTP
-  // header is consistent with what JS sees.
-  await context.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+  // Locale alignment for Belgian outreach queries: Accept-Language matches
+  // navigator.languages from the stealth shim, geolocation pinned to Brussels.
+  // Mismatch between any of (proxy country, Accept-Language, navigator.languages,
+  // geolocation, timezone) is itself a fingerprint signal — Google flags
+  // "browser claims US locale but exits via Belgian residential IP" inside
+  // its first request.
+  await context.setExtraHTTPHeaders({
+    "Accept-Language": "en-BE,en;q=0.9,nl-BE;q=0.8,fr-BE;q=0.7",
+  });
+  // Brussels city center coordinates. Granted to google.com so any geolocation
+  // probe (Local Finder uses these) returns plausible Belgian coords instead
+  // of "permission denied" or default 0,0.
+  await context.setGeolocation({ latitude: 50.8503, longitude: 4.3517 });
+  await context.grantPermissions(["geolocation"], { origin: "https://www.google.com" });
 
   cached = { browser, context };
   return cached;

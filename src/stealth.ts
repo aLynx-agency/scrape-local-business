@@ -24,10 +24,11 @@ export const STEALTH_INIT_SCRIPT = `
   } catch (_) {}
 
   // 2. navigator.languages — empty array in headless, populated in real
-  // Chrome. Match the Accept-Language we'll send.
+  // Chrome. Match the Accept-Language header we send (Belgian locale chain).
+  // Mismatch between header and JS array is itself a fingerprint flag.
   try {
     Object.defineProperty(Navigator.prototype, 'languages', {
-      get: () => ['en-US', 'en'],
+      get: () => ['en-BE', 'en', 'nl-BE', 'fr-BE'],
       configurable: true,
     });
   } catch (_) {}

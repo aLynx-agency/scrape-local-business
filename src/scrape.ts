@@ -10,7 +10,17 @@ import type { ScrapeResponse, SerpResult } from "./types.ts";
 
 const SCREENSHOT_DIR = "screenshots";
 const DATA_DIR = "data";
-const VIEWPORT_WIDTH = 1366;
+
+// Realistic desktop viewports (Mac/PC popular sizes, 2024 web stats). A fixed
+// 1366×900 is itself a soft tell; we randomize per scrape so consecutive
+// requests don't look like the same automated session.
+const VIEWPORTS = [
+  { width: 1366, height: 768 },
+  { width: 1440, height: 900 },
+  { width: 1536, height: 864 },
+  { width: 1920, height: 1080 },
+] as const;
+
 // Google Local Finder serves 10 results per page (was 20 in older layouts).
 // `start` is a 0-based row offset, so page N's URL gets start = N * 10. With
 // the wrong stride (20) we'd step over half of every page's results — visible
@@ -24,7 +34,27 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
   const page = await context.newPage();
 
   try {
-    await page.setViewportSize({ width: VIEWPORT_WIDTH, height: 900 });
+    const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+    await page.setViewportSize(viewport);
+    console.log(`[scrape] viewport: ${viewport.width}x${viewport.height}`);
+
+    // Pin browser timezone to Brussels — matches the proxy's Belgian exit and
+    // the Belgian locale we claim. Playwright's `page.emulateTimezone` isn't
+    // available on contexts attached via connectOverCDP, so we send the raw
+    // CDP command. If the server is on UTC and we don't do this, the browser
+    // reports UTC even though it claims Belgian locale — a mismatch flag.
+    try {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Emulation.setTimezoneOverride", { timezoneId: "Europe/Brussels" });
+    } catch (e) {
+      console.warn(`[scrape] timezone override failed: ${(e as Error).message}`);
+    }
+
+    // Warmup: visit google.com homepage first like a real user would,
+    // accept consent, idle. Cold-jumping to /search?q=…&udm=1 from a brand
+    // new session is itself a strong bot signal — no real user knows the URL
+    // schema. ~10s overhead, meaningful drop in /sorry/ rate on a fresh profile.
+    await warmupGoogle(page);
 
     await mkdir(SCREENSHOT_DIR, { recursive: true });
     await mkdir(DATA_DIR, { recursive: true });
@@ -169,7 +199,20 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
   }
 }
 
+// Canonical screenshot dimensions. The browse-time viewport is randomized
+// per scrape (fingerprint variety), but the outreach asset must always be
+// the same size so downstream tools and templates can rely on it. We resize
+// to this only inside captureTop5Screenshot, then leave it — the rest of
+// pagination doesn't depend on a specific viewport.
+const SCREENSHOT_WIDTH = 1366;
+const SCREENSHOT_HEIGHT = 900;
+
 async function captureTop5Screenshot(page: Page, screenshotPath: string): Promise<void> {
+  // Resize to canonical screenshot size before measuring or capturing. Real
+  // users do resize their windows, so this isn't itself a fingerprint flag.
+  await page.setViewportSize({ width: SCREENSHOT_WIDTH, height: SCREENSHOT_HEIGHT });
+  await page.waitForTimeout(500); // let layout reflow
+
   // Hide sponsored cards so visual rank matches data rank.
   await page.evaluate(() => {
     document.querySelectorAll("div.VkpGBb").forEach((card) => {
@@ -193,14 +236,35 @@ async function captureTop5Screenshot(page: Page, screenshotPath: string): Promis
   let clip: { x: number; y: number; width: number; height: number } | undefined;
   if (cutoffCard) {
     const box = await cutoffCard.boundingBox();
-    if (box) clip = { x: 0, y: 0, width: VIEWPORT_WIDTH, height: Math.ceil(box.y - 4) };
+    if (box) clip = { x: 0, y: 0, width: SCREENSHOT_WIDTH, height: Math.ceil(box.y - 4) };
   } else if (visibleCards.length > 0) {
     const lastBox = await visibleCards[visibleCards.length - 1].boundingBox();
-    if (lastBox) clip = { x: 0, y: 0, width: VIEWPORT_WIDTH, height: Math.ceil(lastBox.y + lastBox.height + 80) };
+    if (lastBox) clip = { x: 0, y: 0, width: SCREENSHOT_WIDTH, height: Math.ceil(lastBox.y + lastBox.height + 80) };
   }
   // `fullPage: true` is required alongside `clip`: without it, Playwright caps
   // the screenshot at viewport height (900px), silently truncating the bottom.
   await page.screenshot(clip ? { path: screenshotPath, fullPage: true, clip } : { path: screenshotPath, fullPage: true });
+}
+
+async function warmupGoogle(page: Page): Promise<void> {
+  // Visit google.com homepage like a real user would, accept consent, idle.
+  // Cold-jumping straight to /search?q=…&udm=1 from a brand new session is
+  // a strong bot signal — no real user knows the URL schema. Best-effort:
+  // failure here doesn't abort the scrape, the main pagination loop will
+  // try its own goto and dismissConsent.
+  try {
+    console.log("[warmup] visiting google.com homepage…");
+    await page.goto("https://www.google.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 20_000,
+    });
+    await dismissConsent(page);
+    const idleMs = 5_000 + Math.random() * 5_000;
+    console.log(`[warmup] idle ${Math.round(idleMs)}ms (real user reading the page)`);
+    await page.waitForTimeout(idleMs);
+  } catch (e) {
+    console.warn(`[warmup] failed: ${(e as Error).message} — continuing without warmup`);
+  }
 }
 
 async function dismissConsent(page: Page): Promise<void> {
