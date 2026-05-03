@@ -29,12 +29,16 @@ stop_all() {
   # multi-process tree can take a couple of seconds to shut down on TERM, and
   # if the parent is killed before the children exit we end up with a stale
   # CDP-port binding that fools wait_for_port into thinking Chrome is up.
+  #
+  # We match on --remote-debugging-port=9222 rather than `google-chrome`
+  # because the wrapper exec's into `chrome` (or `chromium` for Playwright's
+  # bundled binary) and the wrapper name no longer appears in /proc/*/comm.
   pkill -f "scripts/proxy-relay.mjs" 2>/dev/null || true
-  pkill -f "google-chrome" 2>/dev/null || true
+  pkill -f "remote-debugging-port=9222" 2>/dev/null || true
   pkill -f "tsx.*src/server" 2>/dev/null || true
   sleep 2
   pkill -9 -f "scripts/proxy-relay.mjs" 2>/dev/null || true
-  pkill -9 -f "google-chrome" 2>/dev/null || true
+  pkill -9 -f "remote-debugging-port=9222" 2>/dev/null || true
   pkill -9 -f "tsx.*src/server" 2>/dev/null || true
   # Stale profile locks block the next Chrome launch — kill them too.
   rm -f chrome-profile/Singleton{Lock,Cookie,Socket} 2>/dev/null || true

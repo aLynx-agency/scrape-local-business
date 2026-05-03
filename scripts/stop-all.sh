@@ -7,7 +7,11 @@
 set -euo pipefail
 
 stopped=0
-for pat in "scripts/proxy-relay.mjs" "google-chrome" "tsx.*src/server"; do
+# `google-chrome` only matches the wrapper; the post-exec process is named
+# `chrome` (Google Chrome) or `chromium` (Playwright's bundled binary). Match
+# on the --remote-debugging-port flag instead — that's specific to launches
+# we own and can't false-match on unrelated browsers.
+for pat in "scripts/proxy-relay.mjs" "remote-debugging-port=9222" "tsx.*src/server"; do
   if pkill -f "$pat" 2>/dev/null; then
     stopped=$((stopped + 1))
   fi
@@ -23,7 +27,7 @@ sleep 2
 
 # SIGKILL anything still alive.
 pkill -9 -f "scripts/proxy-relay.mjs" 2>/dev/null || true
-pkill -9 -f "google-chrome" 2>/dev/null || true
+pkill -9 -f "remote-debugging-port=9222" 2>/dev/null || true
 pkill -9 -f "tsx.*src/server" 2>/dev/null || true
 
 # Clean up Chrome profile lock files so the next start-all isn't blocked by
