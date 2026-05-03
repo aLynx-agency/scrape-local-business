@@ -5,7 +5,7 @@ import type { Page } from "playwright";
 import { closeOpenedPages, connect } from "./chrome.ts";
 import { writeCsv } from "./csv.ts";
 import { findEmailsConcurrent } from "./email.ts";
-import { isBlocked, solveIfBlocked } from "./captcha.ts";
+import { isBlockedDeep, solveIfBlocked } from "./captcha.ts";
 import type { ScrapeResponse, SerpResult } from "./types.ts";
 
 const SCREENSHOT_DIR = "screenshots";
@@ -42,8 +42,11 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
       // Also lets Google's instrumentation see a non-zero dwell before any DOM action.
       await page.waitForTimeout(600 + Math.random() * 500);
 
-      // CAPTCHA / soft block check. If 2captcha key is set we try to solve.
-      if (isBlocked(page)) {
+      // CAPTCHA / soft block check. `isBlockedDeep` catches both /sorry/ pages
+      // and the softer "Our systems have detected unusual traffic" interstitial
+      // that lives on /search?q=… (and clicks any Continue button to advance to
+      // the actual challenge). If 2captcha key is set we try to solve.
+      if (await isBlockedDeep(page)) {
         const solved = await solveIfBlocked(page);
         if (!solved) {
           console.log(`[scrape] blocked at page ${pageNum + 1}, cannot solve — stopping pagination`);

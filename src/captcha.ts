@@ -14,6 +14,58 @@ export function isBlocked(page: Page): boolean {
 }
 
 /**
+ * URL-based block check (`isBlocked`) misses Google's softer interstitial,
+ * which lives on the original `/search?q=...` URL and just shows an "About this
+ * page / Our systems have detected unusual traffic" body. Run this before
+ * giving up on a page that "loaded" but might be a stealth block.
+ *
+ * If the interstitial has a "Continue" button (no captcha widget), this clicks
+ * it and waits for the real challenge — Google often delivers the interstitial
+ * first and the captcha only after acknowledgement.
+ */
+export async function isBlockedDeep(page: Page): Promise<boolean> {
+  if (isBlocked(page)) return true;
+
+  const blockState = await page.evaluate(() => {
+    const text = (document.body?.innerText ?? "").slice(0, 3000);
+    const hasBlockText =
+      /unusual traffic|automated queries|Our systems have detected|About this page|verify you('|’)?re not a robot/i.test(
+        text,
+      );
+    const hasWidget = !!document.querySelector(
+      "[data-sitekey], #recaptcha, .g-recaptcha, [data-hcaptcha-sitekey]",
+    );
+    // "Continue" button on the soft interstitial — text varies by locale.
+    const continueBtn = Array.from(document.querySelectorAll("button, input[type='submit'], a")).find(
+      (el) => /^(Continue|Continuer|Doorgaan|Verder|Weiter)$/i.test((el.textContent ?? "").trim()),
+    ) as HTMLElement | null;
+    return { hasBlockText, hasWidget, hasContinue: !!continueBtn };
+  });
+
+  if (!blockState.hasBlockText && !blockState.hasWidget) return false;
+
+  // Soft interstitial with a Continue button and no widget yet: click through,
+  // wait, then re-check. Google delivers the captcha after acknowledgement.
+  if (blockState.hasContinue && !blockState.hasWidget) {
+    console.log("[captcha] soft interstitial detected, clicking Continue…");
+    await page
+      .evaluate(() => {
+        const btn = Array.from(
+          document.querySelectorAll("button, input[type='submit'], a"),
+        ).find((el) => /^(Continue|Continuer|Doorgaan|Verder|Weiter)$/i.test((el.textContent ?? "").trim())) as
+          | HTMLElement
+          | null;
+        btn?.click();
+      })
+      .catch(() => {});
+    await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+  }
+
+  return true;
+}
+
+/**
  * Detects Google's CAPTCHA challenge page and solves it via 2captcha if
  * `TWOCAPTCHA_API_KEY` is set. Returns true if a CAPTCHA was solved (and the
  * page navigated past the block), false if no CAPTCHA was present or solving failed.
@@ -25,7 +77,9 @@ export function isBlocked(page: Page): boolean {
  * make that distinguishable from a code bug.
  */
 export async function solveIfBlocked(page: Page): Promise<boolean> {
-  if (!isBlocked(page)) return false;
+  // isBlockedDeep also catches /search?q= interstitials and clicks through any
+  // "Continue" button so we land on the actual challenge before solving.
+  if (!(await isBlockedDeep(page))) return false;
 
   const diagId = new Date().toISOString().replace(/[:.]/g, "-");
   await dumpDiagnostic(page, diagId, "before");

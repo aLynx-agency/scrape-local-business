@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext } from "playwright";
+import { STEALTH_INIT_SCRIPT } from "./stealth.ts";
 
 const CDP_PORT = process.env.CDP_PORT ?? "9222";
 // Use 127.0.0.1 explicitly — `localhost` resolves to ::1 (IPv6) first on Node 20+
@@ -25,6 +26,15 @@ export async function connect(): Promise<{ browser: Browser; context: BrowserCon
   // calls. When that code runs inside `page.evaluate` it executes in the browser,
   // where `__name` is undefined. Shim it once per context via init script.
   await context.addInitScript({ content: "globalThis.__name = globalThis.__name || function(fn){return fn;};" });
+
+  // Anti-fingerprint shim — patches navigator.webdriver, plugins, languages,
+  // chrome.runtime, WebGL renderer, etc. before any site JS runs. Required for
+  // Google scraping past the first request, even with a residential proxy.
+  await context.addInitScript({ content: STEALTH_INIT_SCRIPT });
+
+  // Match the Accept-Language we claim in navigator.languages so the HTTP
+  // header is consistent with what JS sees.
+  await context.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
 
   cached = { browser, context };
   return cached;
