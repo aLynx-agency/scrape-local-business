@@ -25,15 +25,34 @@ RELAY_PORT="${RELAY_PORT:-8888}"
 API_PORT="${PORT:-3000}"
 
 stop_all() {
+  # Two-phase: SIGTERM, wait, then SIGKILL anything still alive. Chrome's
+  # multi-process tree can take a couple of seconds to shut down on TERM, and
+  # if the parent is killed before the children exit we end up with a stale
+  # CDP-port binding that fools wait_for_port into thinking Chrome is up.
   pkill -f "scripts/proxy-relay.mjs" 2>/dev/null || true
-  pkill -f "google-chrome-stable" 2>/dev/null || true
+  pkill -f "google-chrome" 2>/dev/null || true
   pkill -f "tsx.*src/server" 2>/dev/null || true
+  sleep 2
+  pkill -9 -f "scripts/proxy-relay.mjs" 2>/dev/null || true
+  pkill -9 -f "google-chrome" 2>/dev/null || true
+  pkill -9 -f "tsx.*src/server" 2>/dev/null || true
+  # Stale profile locks block the next Chrome launch — kill them too.
+  rm -f chrome-profile/Singleton{Lock,Cookie,Socket} 2>/dev/null || true
 }
 
 wait_for_port() {
   local port="$1" timeout="${2:-20}"
   for ((i = 0; i < timeout * 2; i++)); do
     ss -ltn 2>/dev/null | grep -q ":${port} " && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+wait_for_port_free() {
+  local port="$1" timeout="${2:-10}"
+  for ((i = 0; i < timeout * 2; i++)); do
+    ss -ltn 2>/dev/null | grep -q ":${port} " || return 0
     sleep 0.5
   done
   return 1
@@ -50,7 +69,14 @@ wait_for_url() {
 
 echo "[1/5] Stopping any prior instances…"
 stop_all
-sleep 1
+# Verify the CDP port is actually free before we try to bind it again. If a
+# stale Chrome zombie is still holding 9222, wait_for_port below would happily
+# claim Chrome is up and we'd scrape through the wrong process.
+if ! wait_for_port_free "$CDP_PORT" 10; then
+  echo "FAILED: port $CDP_PORT still bound after SIGKILL — manual cleanup needed."
+  ss -ltnp 2>/dev/null | grep ":$CDP_PORT "
+  exit 1
+fi
 
 if [[ -n "${UPSTREAM_PROXY:-}" ]]; then
   echo "[2/5] Starting proxy-relay → ${UPSTREAM_PROXY%%@*}@***"
@@ -78,6 +104,14 @@ echo "[4/5] Starting Chrome (headless)…"
 nohup env HEADLESS=true bash scripts/launch-chrome.sh >"$LOG_DIR/chrome.log" 2>&1 &
 if ! wait_for_port "$CDP_PORT" 15; then
   echo "FAILED: Chrome didn't bind 127.0.0.1:$CDP_PORT"
+  tail -30 "$LOG_DIR/chrome.log"
+  exit 1
+fi
+# Bound port isn't enough — verify CDP actually answers (catches the case where
+# Chrome printed its banner, hit a SingletonLock, exited, and a stale zombie is
+# holding the socket).
+if ! wait_for_url "http://127.0.0.1:$CDP_PORT/json/version" 10; then
+  echo "FAILED: port $CDP_PORT bound but CDP not answering. Chrome likely crashed:"
   tail -30 "$LOG_DIR/chrome.log"
   exit 1
 fi
