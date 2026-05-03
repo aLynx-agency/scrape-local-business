@@ -60,7 +60,9 @@ fastify.post<{ Body: { url?: string; full?: boolean } }>("/lighthouse", async (r
   if (!url || !/^https?:\/\//i.test(url)) {
     return reply.code(400).send({ error: "missing or invalid 'url' in body" });
   }
-  const full = req.body?.full === true;
+  // Default to returning the full LHR (~1 MB JSON). Pass `"full": false` to
+  // get just the summary if the payload size becomes a problem downstream.
+  const full = req.body?.full !== false;
   const job = enqueueLighthouse(url, full);
   return reply.code(202).send({
     jobId: job.jobId,
