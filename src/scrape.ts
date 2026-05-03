@@ -11,7 +11,12 @@ import type { ScrapeResponse, SerpResult } from "./types.ts";
 const SCREENSHOT_DIR = "screenshots";
 const DATA_DIR = "data";
 const VIEWPORT_WIDTH = 1366;
-const RESULTS_PER_PAGE = 20;
+// Google Local Finder serves 10 results per page (was 20 in older layouts).
+// `start` is a 0-based row offset, so page N's URL gets start = N * 10. With
+// the wrong stride (20) we'd step over half of every page's results — visible
+// in scrape logs as ~10 unique prospects per page instead of ~20, with
+// every-other-rank gaps in the output.
+const RESULTS_PER_PAGE = 10;
 
 export async function scrape(query: string, maxPages = 5): Promise<ScrapeResponse> {
   const id = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID().slice(0, 8)}`;
