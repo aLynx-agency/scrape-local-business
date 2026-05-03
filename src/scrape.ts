@@ -34,65 +34,95 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
     let screenshotPath = join(SCREENSHOT_DIR, `${id}.png`);
     let pagesScraped = 0;
 
+    // Track consecutive failures (transient errors *or* "no cards" pages). One
+    // bad page shouldn't kill the whole scrape — try the next page. But if
+    // we hit several in a row, that's either end-of-results or a persistent
+    // block, and we should stop rather than burn the rest of the budget.
+    const MAX_CONSECUTIVE_FAILURES = 2;
+    let consecutiveFailures = 0;
+
     for (let pageNum = 0; pageNum < maxPages; pageNum++) {
       const start = pageNum * RESULTS_PER_PAGE;
       const url =
         `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=1&hl=en` +
         (start > 0 ? `&start=${start}` : "");
       console.log(`[scrape] page ${pageNum + 1}/${maxPages} — ${url}`);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await dismissConsent(page);
 
-      // Settle after navigation — a real user takes a moment to "read" the page
-      // before clicking. Slower pacing trades latency for lower /sorry/ rate.
-      await page.waitForTimeout(1500 + Math.random() * 1500);
-
-      // CAPTCHA / soft block check. `isBlockedDeep` catches both /sorry/ pages
-      // and the softer "Our systems have detected unusual traffic" interstitial
-      // that lives on /search?q=… (and clicks any Continue button to advance to
-      // the actual challenge). If 2captcha key is set we try to solve.
-      if (await isBlockedDeep(page)) {
-        const solved = await solveIfBlocked(page);
-        if (!solved) {
-          console.log(`[scrape] blocked at page ${pageNum + 1}, cannot solve — stopping pagination`);
-          break;
-        }
-      }
-
+      let pageOk = false;
+      let pageHardBlock = false;
       try {
-        await page.waitForSelector("div.VkpGBb", { timeout: 10_000 });
-      } catch {
-        console.log(`[scrape] no cards on page ${pageNum + 1} — end of results`);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+        await dismissConsent(page);
+
+        // Settle after navigation — a real user takes a moment to "read" the
+        // page before clicking. Slower pacing trades latency for lower /sorry/.
+        await page.waitForTimeout(1500 + Math.random() * 1500);
+
+        // CAPTCHA / soft block check. `isBlockedDeep` catches both /sorry/
+        // pages and the softer "unusual traffic" interstitial on /search?q=….
+        if (await isBlockedDeep(page)) {
+          const solved = await solveIfBlocked(page);
+          if (!solved) {
+            console.log(`[scrape] blocked at page ${pageNum + 1}, cannot solve — stopping pagination`);
+            pageHardBlock = true;
+          }
+        }
+
+        if (!pageHardBlock) {
+          try {
+            await page.waitForSelector("div.VkpGBb", { timeout: 10_000 });
+          } catch {
+            console.log(`[scrape] no cards on page ${pageNum + 1} — likely end of results or transient`);
+            consecutiveFailures++;
+            // fall through; pageOk stays false
+          }
+
+          if (await page.$("div.VkpGBb")) {
+            const pageResults = await extractLocal(page);
+            if (pageResults.length === 0) {
+              console.log(`[scrape] zero usable results on page ${pageNum + 1}`);
+              consecutiveFailures++;
+            } else {
+              let added = 0;
+              for (const r of pageResults) {
+                if (seenNames.has(r.name)) continue; // dedupe across pages
+                seenNames.add(r.name);
+                r.position = results.length + 1;
+                results.push(r);
+                added++;
+              }
+              console.log(`[scrape] page ${pageNum + 1} added ${added} new prospects (total ${results.length})`);
+              pagesScraped++;
+              pageOk = true;
+              consecutiveFailures = 0;
+
+              // Take screenshot only on page 1 — that's the outreach asset.
+              if (pageNum === 0) {
+                try {
+                  await captureTop5Screenshot(page, screenshotPath);
+                } catch (e) {
+                  console.warn(`[scrape] screenshot failed: ${(e as Error).message} — continuing without it`);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[scrape] page ${pageNum + 1} threw: ${(e as Error).message} — skipping to next page`);
+        consecutiveFailures++;
+      }
+
+      if (pageHardBlock) break;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.log(`[scrape] ${consecutiveFailures} consecutive page failures — stopping pagination`);
         break;
       }
 
-      const pageResults = await extractLocal(page);
-      if (pageResults.length === 0) {
-        console.log(`[scrape] zero usable results on page ${pageNum + 1} — stopping`);
-        break;
-      }
-
-      let added = 0;
-      for (const r of pageResults) {
-        if (seenNames.has(r.name)) continue; // dedupe across pages
-        seenNames.add(r.name);
-        r.position = results.length + 1;
-        results.push(r);
-        added++;
-      }
-      console.log(`[scrape] page ${pageNum + 1} added ${added} new prospects (total ${results.length})`);
-      pagesScraped++;
-
-      // Take screenshot only on page 1 — that's the outreach asset.
-      if (pageNum === 0) {
-        await captureTop5Screenshot(page, screenshotPath);
-      }
-
-      // Longer jittered delay between page loads — humans don't paginate every
-      // second. 4–8s is "casually browsing" pace and meaningfully reduces the
-      // parallel-search-from-same-IP signature Google watches for.
+      // Inter-page wait — only when we're going to try another page. Use a
+      // shorter delay after a failed page (we're retrying, not browsing).
       if (pageNum + 1 < maxPages) {
-        await page.waitForTimeout(4000 + Math.random() * 4000);
+        const delay = pageOk ? 4000 + Math.random() * 4000 : 2000 + Math.random() * 1500;
+        await page.waitForTimeout(delay);
       }
     }
 
@@ -106,9 +136,19 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
     // Email crawl across the entire accumulated list. Concurrency 3 (down
     // from 5): slower but a meaningful reduction in proxy bandwidth peaks
     // and stall risk on slow agency sites.
-    const { context: ctx } = await connect();
-    const emails = await findEmailsConcurrent(ctx, results, 3);
-    for (let i = 0; i < results.length; i++) results[i].email = emails[i];
+    //
+    // Resilience: per-prospect failures are already swallowed inside
+    // findEmailsConcurrent (.catch(() => "") on each chunk member), so one
+    // dead site can't break the rest. Catastrophic failures (e.g. CDP drops
+    // mid-crawl) are wrapped here so the SERP results we already have still
+    // get returned, just without emails.
+    try {
+      const { context: ctx } = await connect();
+      const emails = await findEmailsConcurrent(ctx, results, 3);
+      for (let i = 0; i < results.length; i++) results[i].email = emails[i];
+    } catch (e) {
+      console.warn(`[scrape] email crawl failed wholesale: ${(e as Error).message} — returning prospects without emails`);
+    }
 
     const csvPath = join(DATA_DIR, `${id}.csv`);
     await writeCsv(csvPath, results);

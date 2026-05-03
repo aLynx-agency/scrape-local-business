@@ -16,11 +16,24 @@ export async function findEmail(context: BrowserContext, url: string): Promise<s
   if (/^https?:\/\/(?:www\.)?google\.[a-z.]+\/maps/i.test(url)) return "";
 
   // Hard ceiling per prospect — guarantees the chunk completes even if a site
-  // misbehaves (slow network, hung script, page.evaluate stall).
-  return await Promise.race([
-    findEmailInner(context, url),
-    new Promise<string>((resolve) => setTimeout(() => resolve(""), PROSPECT_TOTAL_TIMEOUT_MS)),
+  // misbehaves (slow network, hung script, page.evaluate stall). The TIMED_OUT
+  // sentinel lets us distinguish "site cleanly returned no emails" from
+  // "site never responded" in the logs.
+  const TIMED_OUT = "__timeout__";
+  const result = await Promise.race([
+    findEmailInner(context, url).catch((e) => {
+      console.warn(`[email] threw for ${url}: ${(e as Error).message}`);
+      return "";
+    }),
+    new Promise<string>((resolve) =>
+      setTimeout(() => resolve(TIMED_OUT), PROSPECT_TOTAL_TIMEOUT_MS),
+    ),
   ]);
+  if (result === TIMED_OUT) {
+    console.warn(`[email] timed out after ${PROSPECT_TOTAL_TIMEOUT_MS}ms — ${url}`);
+    return "";
+  }
+  return result;
 }
 
 async function findEmailInner(context: BrowserContext, url: string): Promise<string> {
@@ -176,11 +189,18 @@ export async function findEmailsConcurrent<T extends { url: string }>(
   concurrency = 5,
 ): Promise<string[]> {
   const out: string[] = new Array(items.length).fill("");
+  // Promise.allSettled (vs. .all + .catch) means a chunk member's
+  // unexpected rejection can't take down the whole chunk's await — every
+  // slot resolves to either an email string or "" (on rejection).
   for (let i = 0; i < items.length; i += concurrency) {
     const chunk = items.slice(i, i + concurrency);
-    const settled = await Promise.all(chunk.map((item) => findEmail(context, item.url).catch(() => "")));
+    const settled = await Promise.allSettled(chunk.map((item) => findEmail(context, item.url)));
     for (let j = 0; j < settled.length; j++) {
-      out[i + j] = settled[j];
+      const r = settled[j];
+      out[i + j] = r.status === "fulfilled" ? r.value : "";
+      if (r.status === "rejected") {
+        console.warn(`[email] rejected (unexpected) for ${chunk[j].url}: ${(r.reason as Error)?.message ?? r.reason}`);
+      }
     }
   }
   return out;
