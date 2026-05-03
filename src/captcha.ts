@@ -93,7 +93,7 @@ export async function solveIfBlocked(page: Page): Promise<boolean> {
   const pageUrl = page.url();
   const challenge = await detectChallenge(page);
   console.log(
-    `[captcha] challenge type: ${challenge.type}${challenge.enterprise ? " (enterprise)" : ""}, sitekey: ${challenge.siteKey ?? "<none>"}`,
+    `[captcha] challenge type: ${challenge.type}${challenge.enterprise ? " (enterprise)" : ""}, sitekey: ${challenge.siteKey ?? "<none>"}, data-s: ${challenge.dataS ? "yes" : "no"}, cookies: ${challenge.cookies ? "yes" : "no"}`,
   );
 
   if (challenge.type === "none") {
@@ -107,7 +107,11 @@ export async function solveIfBlocked(page: Page): Promise<boolean> {
 
   console.log("[captcha] block detected, submitting to 2captcha…");
   const submitTime = Date.now();
-  const token = await solveRecaptchaV2(apiKey, challenge.siteKey, pageUrl, challenge.enterprise);
+  const token = await solveRecaptchaV2(apiKey, challenge.siteKey, pageUrl, challenge.enterprise, {
+    dataS: challenge.dataS,
+    userAgent: challenge.userAgent,
+    cookies: challenge.cookies,
+  });
   if (!token) {
     console.warn("[captcha] 2captcha did not return a token");
     await dumpDiagnostic(page, diagId, "no-token");
@@ -144,6 +148,17 @@ type Challenge = {
   type: "recaptcha-v2" | "recaptcha-invisible" | "hcaptcha" | "none";
   siteKey: string | null;
   enterprise: boolean;
+  // `data-s` is Google's per-challenge anti-replay token on /sorry/ pages.
+  // Without it, 2captcha refuses the task — the article from 2captcha's blog
+  // (May 2025) is explicit: "No data-s? The CAPTCHA won't even start."
+  dataS: string | null;
+  // The user-agent the page is being rendered under. 2captcha replays the
+  // solve session and the UA needs to match the browser that will submit
+  // the token, or Google rejects on validation.
+  userAgent: string;
+  // Google session cookies (NID/SID/etc.). 2captcha replays them so the
+  // solve happens in the same session context as our submit.
+  cookies: string;
 };
 
 async function detectChallenge(page: Page): Promise<Challenge> {
@@ -152,6 +167,8 @@ async function detectChallenge(page: Page): Promise<Challenge> {
     // but tokens issued for one don't validate against the other — 2captcha
     // needs `enterprise=1` set when submitting.
     const enterprise = !!document.querySelector('script[src*="recaptcha/enterprise"]');
+    const userAgent = navigator.userAgent;
+    const cookies = document.cookie;
 
     // hCaptcha
     const hc = document.querySelector("[data-hcaptcha-sitekey], .h-captcha[data-sitekey]");
@@ -161,6 +178,9 @@ async function detectChallenge(page: Page): Promise<Challenge> {
         siteKey:
           hc.getAttribute("data-hcaptcha-sitekey") ?? hc.getAttribute("data-sitekey") ?? null,
         enterprise: false,
+        dataS: null,
+        userAgent,
+        cookies,
       };
     }
     // reCAPTCHA — both v2 and invisible expose data-sitekey on the widget
@@ -173,9 +193,19 @@ async function detectChallenge(page: Page): Promise<Challenge> {
         type: size === "invisible" ? "recaptcha-invisible" : "recaptcha-v2",
         siteKey: rc.getAttribute("data-sitekey"),
         enterprise,
+        dataS: rc.getAttribute("data-s"),
+        userAgent,
+        cookies,
       };
     }
-    return { type: "none", siteKey: null, enterprise: false };
+    return {
+      type: "none",
+      siteKey: null,
+      enterprise: false,
+      dataS: null,
+      userAgent,
+      cookies,
+    };
   });
 }
 
@@ -249,12 +279,27 @@ async function solveRecaptchaV2(
   siteKey: string,
   pageUrl: string,
   enterprise: boolean,
+  extra: { dataS: string | null; userAgent: string; cookies: string },
 ): Promise<string | null> {
-  // For reCAPTCHA Enterprise, 2captcha needs `enterprise=1` — Enterprise tokens
-  // are scored against a different verifier and submitting a regular-v2 task
-  // returns a syntactically valid token that Google rejects on form post.
-  const enterpriseFlag = enterprise ? "&enterprise=1" : "";
-  const submitUrl = `${API_BASE}/in.php?key=${apiKey}&method=userrecaptcha&googlekey=${encodeURIComponent(siteKey)}&pageurl=${encodeURIComponent(pageUrl)}${enterpriseFlag}&json=1`;
+  // 2captcha's Google /sorry/ flow in 2025 requires:
+  //   - `enterprise=1` if the page loads /recaptcha/enterprise.js
+  //   - `data-s` from the widget element (per-challenge anti-replay token).
+  //     Without it the task either fails immediately or returns a token Google
+  //     rejects on submit.
+  //   - `userAgent` matching the browser that will submit. Mismatch = rejection.
+  //   - Google session `cookies` so 2captcha solves in the same session context.
+  const params = new URLSearchParams({
+    key: apiKey,
+    method: "userrecaptcha",
+    googlekey: siteKey,
+    pageurl: pageUrl,
+    json: "1",
+  });
+  if (enterprise) params.set("enterprise", "1");
+  if (extra.dataS) params.set("data-s", extra.dataS);
+  if (extra.userAgent) params.set("userAgent", extra.userAgent);
+  if (extra.cookies) params.set("cookies", extra.cookies);
+  const submitUrl = `${API_BASE}/in.php?${params.toString()}`;
   const submitRes = await fetch(submitUrl).catch(() => null);
   if (!submitRes || !submitRes.ok) return null;
   const submit = (await submitRes.json()) as { status: number; request: string; error_text?: string };
