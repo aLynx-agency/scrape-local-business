@@ -5,6 +5,16 @@
 
 set -euo pipefail
 
+# Load .env if present so PROXY_SERVER / HEADLESS / CHROME_PATH / CDP_PORT can
+# all live in one config file alongside the API server's own .env vars.
+# `set -a` exports every var defined while sourcing.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 CDP_PORT="${CDP_PORT:-9222}"
 USER_DATA_DIR="${USER_DATA_DIR:-$(pwd)/chrome-profile}"
 
