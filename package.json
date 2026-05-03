@@ -8,12 +8,16 @@
     "start": "tsx --env-file=.env src/server.ts",
     "typecheck": "tsc",
     "chrome": "bash scripts/launch-chrome.sh",
-    "smoke": "tsx src/smoke.ts"
+    "smoke": "tsx src/smoke.ts",
+    "proxy-relay": "node --env-file=.env scripts/proxy-relay.mjs",
+    "start-all": "bash scripts/start-all.sh",
+    "stop-all": "bash scripts/stop-all.sh"
   },
   "dependencies": {
     "fastify": "^5.0.0",
     "lighthouse": "^13.2.0",
-    "playwright": "^1.48.0"
+    "playwright": "^1.48.0",
+    "proxy-chain": "^2.5.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
