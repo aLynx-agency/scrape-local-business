@@ -80,7 +80,28 @@ PROXY_SERVER=http://proxy.example.com:8080
 # or socks5://proxy.example.com:1080
 ```
 
-Auth proxies (`user:pass@host:port`) need extra wiring at the Playwright level — Chrome strips inline credentials from `--proxy-server`. The simplest workaround is to run a local relay (e.g. `proxy-chain` on Node, or `gost`) that handles upstream auth and exposes a no-auth localhost endpoint, then point `PROXY_SERVER` at the relay.
+Auth proxies (`user:pass@host:port`) need extra wiring at the Playwright level — Chrome strips inline credentials from `--proxy-server`. We ship `scripts/proxy-relay.mjs` for this: it handles upstream auth and exposes a no-auth localhost endpoint Chrome can use. Set:
+
+```env
+UPSTREAM_PROXY=http://user:pass@gw.your-provider.com:port
+RELAY_PORT=8888
+PROXY_SERVER=http://127.0.0.1:8888
+```
+
+**Sticky sessions are required, not optional.** Residential proxies rotate exit IPs per-connection by default. Google binds CAPTCHA challenges to the originating IP, so a token submitted from a different exit gets rejected with `IP address: X ≠ Y` on the /sorry/ page — even though both IPs are residential. The relay solves this by injecting a session tag into the proxy username so every request in one scrape uses the same exit.
+
+```env
+# Default — works for DataImpulse. Other providers vary:
+#   IPRoyal:    -country-be-session-{id}-lifetime-30
+#   Bright Data: -session-{id}
+#   Oxylabs:    -session-{id}-sessTime-30
+# Check your provider's "sticky session" docs.
+STICKY_SESSION_FORMAT=__session.{id}
+
+# Optional — auto-rotate the sticky session every N minutes (0 = never;
+# new IP only on relay restart). Useful for spreading load over time.
+SESSION_ROTATE_MINUTES=0
+```
 
 Lock the file down (it has a paid API key in it):
 
