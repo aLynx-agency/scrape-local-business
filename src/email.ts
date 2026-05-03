@@ -1,7 +1,11 @@
 import type { BrowserContext } from "playwright";
 
-const PAGE_TIMEOUT_MS = 8_000;
-const PROSPECT_TOTAL_TIMEOUT_MS = 25_000;
+// "Slower but sure" — bumped from 8s/25s. Some prospect sites are slow on
+// first byte (especially when proxied), and bandwidth-conscious operators
+// would rather wait than retry. Resource blocking below keeps the actual
+// transferred bytes minimal regardless of the longer time budget.
+const PAGE_TIMEOUT_MS = 15_000;
+const PROSPECT_TOTAL_TIMEOUT_MS = 40_000;
 const JUNK_LOCAL_PART = /^(?:noreply|no-reply|donotreply|do-not-reply|admin|postmaster|webmaster|root|test|wordpress|hello@example)/i;
 const JUNK_DOMAIN = /@(?:example\.(?:com|org|net)|test\.com|sentry\.(?:io|wixpress\.com)|wixpress\.com|godaddy\.com)\b/i;
 const PRIORITY_PREFIXES = ["info@", "contact@", "hello@", "office@", "kontakt@", "contacto@", "mail@"];
@@ -48,8 +52,12 @@ async function visitAndExtract(context: BrowserContext, url: string): Promise<Ex
   let page;
   try {
     page = await context.newPage();
-    // Block heavy resource types — emails live in HTML, we don't need images/fonts/media.
-    // Big speedup for sites with heavy hero images and dramatically reduces stall risk.
+    // Block heavy resource types on prospect sites — emails live in HTML, we
+    // don't need images/fonts/css/media/video. Critical for proxy bandwidth:
+    // a typical agency homepage is 5–20 MB with full assets but ~80 KB of HTML;
+    // blocking these saves ~99% of the outbound proxy traffic per prospect.
+    // (We deliberately do NOT do this for the Google search page — the
+    // top-5 screenshot needs everything.)
     await page.route("**/*", (route) => {
       const t = route.request().resourceType();
       if (t === "image" || t === "media" || t === "font" || t === "stylesheet") {

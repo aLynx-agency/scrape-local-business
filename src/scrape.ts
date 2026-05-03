@@ -38,9 +38,9 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await dismissConsent(page);
 
-      // Brief settle after navigation — human-like pause before "reading" the page.
-      // Also lets Google's instrumentation see a non-zero dwell before any DOM action.
-      await page.waitForTimeout(600 + Math.random() * 500);
+      // Settle after navigation — a real user takes a moment to "read" the page
+      // before clicking. Slower pacing trades latency for lower /sorry/ rate.
+      await page.waitForTimeout(1500 + Math.random() * 1500);
 
       // CAPTCHA / soft block check. `isBlockedDeep` catches both /sorry/ pages
       // and the softer "Our systems have detected unusual traffic" interstitial
@@ -83,10 +83,11 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
         await captureTop5Screenshot(page, screenshotPath);
       }
 
-      // Longer jittered delay between page loads — humans don't paginate every second.
-      // Range chosen to land between fast-but-impatient (2s) and casually-browsing (4.5s).
+      // Longer jittered delay between page loads — humans don't paginate every
+      // second. 4–8s is "casually browsing" pace and meaningfully reduces the
+      // parallel-search-from-same-IP signature Google watches for.
       if (pageNum + 1 < maxPages) {
-        await page.waitForTimeout(2000 + Math.random() * 2500);
+        await page.waitForTimeout(4000 + Math.random() * 4000);
       }
     }
 
@@ -97,9 +98,11 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
 
     await page.close();
 
-    // Email crawl across the entire accumulated list.
+    // Email crawl across the entire accumulated list. Concurrency 3 (down
+    // from 5): slower but a meaningful reduction in proxy bandwidth peaks
+    // and stall risk on slow agency sites.
     const { context: ctx } = await connect();
-    const emails = await findEmailsConcurrent(ctx, results, 5);
+    const emails = await findEmailsConcurrent(ctx, results, 3);
     for (let i = 0; i < results.length; i++) results[i].email = emails[i];
 
     const csvPath = join(DATA_DIR, `${id}.csv`);
@@ -156,26 +159,53 @@ async function captureTop5Screenshot(page: Page, screenshotPath: string): Promis
 }
 
 async function dismissConsent(page: Page): Promise<void> {
-  // Google EU consent dialog. Best-effort: clicking "Accept all" / "Reject all".
-  // Persistent user-data-dir means we only see this once per profile.
-  const candidates = [
+  // The "Before you continue to Google" overlay (and the older EU consent
+  // dialog) is injected lazily after navigation. The previous version of this
+  // function returned immediately if no button was present yet, so we'd often
+  // screenshot the modal sitting on top of results. Poll for up to 4s for an
+  // Accept button across common locales, then verify dismissal.
+  //
+  // We prefer "Accept all" over "Reject all" so the screenshot looks like a
+  // normal Google search session — Reject sometimes triggers a "limited
+  // results" mode that makes the screenshot less useful for outreach.
+  const acceptSelectors = [
     'button:has-text("Accept all")',
+    'button:has-text("Accept All")',
+    'button:has-text("Alles accepteren")', // nl
+    'button:has-text("Alles akzeptieren")', // de
+    'button:has-text("Tout accepter")', // fr
+    'button:has-text("Aceptar todo")', // es
+    'button:has-text("Accetta tutto")', // it
     'button:has-text("I agree")',
-    'button:has-text("Reject all")',
     "#L2AGLb",
+    '[aria-label="Accept all" i]',
   ];
-  for (const sel of candidates) {
-    const btn = page.locator(sel).first();
-    if (await btn.count()) {
-      try {
-        await btn.click({ timeout: 2000 });
-        await page.waitForLoadState("domcontentloaded");
-        return;
-      } catch {
-        // try next selector
+
+  const start = Date.now();
+  let clicked = false;
+  while (!clicked && Date.now() - start < 4000) {
+    for (const sel of acceptSelectors) {
+      const btn = page.locator(sel).first();
+      if ((await btn.count()) > 0) {
+        try {
+          await btn.click({ timeout: 2000 });
+          clicked = true;
+          break;
+        } catch {
+          // not clickable yet, try next
+        }
       }
     }
+    if (!clicked) await page.waitForTimeout(200);
   }
+
+  if (!clicked) return; // no dialog appeared — fine, persistent profile probably already accepted
+
+  // Wait for the modal to actually go away. Reload-style consent reloads the
+  // page; overlay-style fades. Either way, give it a beat to settle so the
+  // subsequent screenshot doesn't capture the dialog mid-fade.
+  await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+  await page.waitForTimeout(800);
 }
 
 async function extractLocal(page: Page): Promise<SerpResult[]> {
