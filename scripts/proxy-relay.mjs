@@ -20,7 +20,13 @@
 //   RELAY_PORT                port to listen on locally (default 8888)
 //   STICKY_SESSION_FORMAT     username suffix template; "{id}" is replaced
 //                             with a random session id. Default is
-//                             "__session.{id}" — DataImpulse's syntax. Set to
+//                             "__session.{id}__lifetime.30" — DataImpulse's
+//                             syntax pinning one exit IP for 30 minutes (the
+//                             provider's default lifetime is ~10 min, which
+//                             is shorter than a single scrape that solves a
+//                             captcha + paginates + crawls emails, so the IP
+//                             would otherwise rotate mid-flow and break
+//                             captcha submissions with IP-mismatch). Set to
 //                             empty string to disable injection. Other
 //                             providers may use "-session-{id}", "__sid.{id}",
 //                             etc. — check your provider's docs.
@@ -32,7 +38,7 @@ import crypto from "node:crypto";
 
 const upstream = process.env.UPSTREAM_PROXY;
 const port = Number(process.env.RELAY_PORT ?? 8888);
-const stickyFormat = process.env.STICKY_SESSION_FORMAT ?? "__session.{id}";
+const stickyFormat = process.env.STICKY_SESSION_FORMAT ?? "__session.{id}__lifetime.30";
 const rotateMinutes = Number(process.env.SESSION_ROTATE_MINUTES ?? 0);
 
 if (!upstream) {

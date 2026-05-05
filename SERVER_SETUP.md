@@ -91,12 +91,17 @@ PROXY_SERVER=http://127.0.0.1:8888
 **Sticky sessions are required, not optional.** Residential proxies rotate exit IPs per-connection by default. Google binds CAPTCHA challenges to the originating IP, so a token submitted from a different exit gets rejected with `IP address: X ≠ Y` on the /sorry/ page — even though both IPs are residential. The relay solves this by injecting a session tag into the proxy username so every request in one scrape uses the same exit.
 
 ```env
-# Default — works for DataImpulse. Other providers vary:
+# Default works for DataImpulse and pins one IP for 30 minutes — long enough
+# to cover a full scrape (warmup + pagination + 2-min captcha solve + email
+# crawl). DataImpulse's default sticky lifetime is only ~10 min, so without
+# the explicit __lifetime tag the IP would rotate mid-flow.
+#
+# Other providers vary:
 #   IPRoyal:    -country-be-session-{id}-lifetime-30
 #   Bright Data: -session-{id}
 #   Oxylabs:    -session-{id}-sessTime-30
 # Check your provider's "sticky session" docs.
-STICKY_SESSION_FORMAT=__session.{id}
+STICKY_SESSION_FORMAT=__session.{id}__lifetime.30
 
 # Optional — auto-rotate the sticky session every N minutes (0 = never;
 # new IP only on relay restart). Useful for spreading load over time.
