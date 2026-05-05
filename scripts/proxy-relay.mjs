@@ -20,15 +20,15 @@
 //   RELAY_PORT                port to listen on locally (default 8888)
 //   STICKY_SESSION_FORMAT     username suffix template; "{id}" is replaced
 //                             with a random session id. Default is
-//                             "__session.{id}__lifetime.30" — DataImpulse's
-//                             syntax pinning one exit IP for 30 minutes (the
-//                             provider's default lifetime is ~10 min, which
-//                             is shorter than a single scrape that solves a
-//                             captcha + paginates + crawls emails, so the IP
-//                             would otherwise rotate mid-flow and break
-//                             captcha submissions with IP-mismatch). Set to
-//                             empty string to disable injection. Other
-//                             providers may use "-session-{id}", "__sid.{id}",
+//                             "__sid.{id}__lifetime.30" — DataImpulse's
+//                             syntax pinning one exit IP for 30 minutes.
+//                             Without `__lifetime` the provider's default
+//                             rotates within minutes, which is shorter than
+//                             a single scrape that solves a captcha +
+//                             paginates + crawls emails, breaking captcha
+//                             submissions with IP-mismatch. Set to empty
+//                             string to disable injection. Other providers
+//                             may use "-session-{id}", "__session.{id}",
 //                             etc. — check your provider's docs.
 //   SESSION_ROTATE_MINUTES    auto-rotate the session id every N minutes.
 //                             Default 0 (never — one IP for the relay lifetime).
@@ -38,7 +38,12 @@ import crypto from "node:crypto";
 
 const upstream = process.env.UPSTREAM_PROXY;
 const port = Number(process.env.RELAY_PORT ?? 8888);
-const stickyFormat = process.env.STICKY_SESSION_FORMAT ?? "__session.{id}__lifetime.30";
+// DataImpulse uses `__sid.<id>__lifetime.<min>` (matches their `__cr.<country>`
+// double-underscore + dot syntax). `__session` is *not* recognized — tagged
+// requests with that key get treated as untagged and rotate per-connection,
+// which is exactly the failure mode "IP CHANGED during solve" surfaces in
+// captcha.ts even though the relay claims sticky is on.
+const stickyFormat = process.env.STICKY_SESSION_FORMAT ?? "__sid.{id}__lifetime.30";
 const rotateMinutes = Number(process.env.SESSION_ROTATE_MINUTES ?? 0);
 
 if (!upstream) {

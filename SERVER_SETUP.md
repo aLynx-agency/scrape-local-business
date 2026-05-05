@@ -101,7 +101,7 @@ PROXY_SERVER=http://127.0.0.1:8888
 #   Bright Data: -session-{id}
 #   Oxylabs:    -session-{id}-sessTime-30
 # Check your provider's "sticky session" docs.
-STICKY_SESSION_FORMAT=__session.{id}__lifetime.30
+STICKY_SESSION_FORMAT=__sid.{id}__lifetime.30
 
 # Optional — auto-rotate the sticky session every N minutes (0 = never;
 # new IP only on relay restart). Useful for spreading load over time.
