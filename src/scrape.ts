@@ -50,12 +50,6 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
       console.warn(`[scrape] timezone override failed: ${(e as Error).message}`);
     }
 
-    // Warmup: visit google.com homepage first like a real user would,
-    // accept consent, idle. Cold-jumping to /search?q=…&udm=1 from a brand
-    // new session is itself a strong bot signal — no real user knows the URL
-    // schema. ~10s overhead, meaningful drop in /sorry/ rate on a fresh profile.
-    await warmupGoogle(page);
-
     await mkdir(SCREENSHOT_DIR, { recursive: true });
     await mkdir(DATA_DIR, { recursive: true });
 
@@ -244,27 +238,6 @@ async function captureTop5Screenshot(page: Page, screenshotPath: string): Promis
   // `fullPage: true` is required alongside `clip`: without it, Playwright caps
   // the screenshot at viewport height (900px), silently truncating the bottom.
   await page.screenshot(clip ? { path: screenshotPath, fullPage: true, clip } : { path: screenshotPath, fullPage: true });
-}
-
-async function warmupGoogle(page: Page): Promise<void> {
-  // Visit google.com homepage like a real user would, accept consent, idle.
-  // Cold-jumping straight to /search?q=…&udm=1 from a brand new session is
-  // a strong bot signal — no real user knows the URL schema. Best-effort:
-  // failure here doesn't abort the scrape, the main pagination loop will
-  // try its own goto and dismissConsent.
-  try {
-    console.log("[warmup] visiting google.com homepage…");
-    await page.goto("https://www.google.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 20_000,
-    });
-    await dismissConsent(page);
-    const idleMs = 5_000 + Math.random() * 5_000;
-    console.log(`[warmup] idle ${Math.round(idleMs)}ms (real user reading the page)`);
-    await page.waitForTimeout(idleMs);
-  } catch (e) {
-    console.warn(`[warmup] failed: ${(e as Error).message} — continuing without warmup`);
-  }
 }
 
 async function dismissConsent(page: Page): Promise<void> {
