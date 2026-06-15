@@ -1,4 +1,4 @@
-import type { BrowserContext } from "playwright";
+import type { BrowserContext } from "patchright";
 
 const PAGE_TIMEOUT_MS = 15_000;
 const PROSPECT_TOTAL_TIMEOUT_MS = 50_000;

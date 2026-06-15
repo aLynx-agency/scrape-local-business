@@ -17,27 +17,34 @@ cp .env.example .env
 
 ## Daily run
 
-You need **two terminals**: one for the browser (must stay open), one for the API.
+Patchright launches its own Chrome via `launchPersistentContext`, so the
+old two-terminal flow (manual `npm run chrome` then `npm run start`) is gone.
+One terminal for the API is enough.
 
-### Terminal 1 — launch the browser
+### Terminal 1 — start the API
 ```bash
 # Headed (visible window, recommended for dev)
-npm run chrome
+npm run start
 
 # OR headless (no window, required for prod / no-display servers)
-HEADLESS=true npm run chrome
+HEADLESS=true npm run start
 ```
-Leave this running. Closing the terminal closes Brave, which kills the API's connection.
+You should see `API ready on :3000`. The first scrape request triggers
+patchright to launch Chrome using `CHROME_PATH` (or `channel: 'chrome'` if
+unset) with a persistent profile at `USER_DATA_DIR` (default `./chrome-profile`).
 
-### Terminal 2 — start the API
+### Optional — manual Chrome for debugging
+If you want to poke at the same profile in a real window between scrapes,
+`scripts/launch-chrome.sh` (the old CDP-attach path) is still around:
 ```bash
-npm run start
+npm run chrome   # opens a headed Chrome on the same user-data-dir
 ```
-You should see `API ready on :3000`. Keep this terminal open too.
+This is **not** required for the API; it's purely for inspecting cookies,
+saved consent, etc.
 
-### Terminal 3 — call the API
+### Terminal 2 — call the API
 ```bash
-# Health check (Brave + API both up?)
+# Health check (API up + patchright able to launch?)
 curl http://localhost:3000/health
 # → {"ok":true,"chromeConnected":true}
 
@@ -70,28 +77,27 @@ The response JSON includes `screenshotPath`, `csvPath`, `reportPath` so n8n / do
 ## Stopping
 
 ```bash
-# Stop the API
+# Stop the API (patchright closes the browser as part of shutdown)
 pkill -f "tsx.*src/server"
 
-# Close the browser (also closes via the terminal where you ran npm run chrome)
-pkill -f "Brave Browser"
+# If the browser hangs around for any reason:
+pkill -f "Google Chrome"   # or "Brave Browser" depending on CHROME_PATH
 ```
 
 ## Troubleshooting
 
-**`Browser CDP not reachable at http://127.0.0.1:9222`**
-The browser isn't running. Run `npm run chrome` in another terminal first.
-
-**Brave is up but the API still errors with `ECONNREFUSED`**
-Make sure no other process is using port 9222: `lsof -i :9222`. Kill the conflicting process or change `CDP_PORT` in `.env`.
+**`Executable doesn't exist at <path>` or `browserType.launch: ...`**
+Patchright can't find a Chrome binary. Either:
+- Set `CHROME_PATH` in `.env` to your installed browser, OR
+- Install Google Chrome (`brew install --cask google-chrome` on Mac, `sudo apt install google-chrome-stable` on Ubuntu) — patchright's default `channel: 'chrome'` will pick it up.
 
 **Heavy CAPTCHA / blocks during pagination**
-Google has flagged the profile. Two options:
+Google has flagged the profile. Options:
 ```bash
 # A — clear the profile and start fresh (loses warm cookies; first scrape may CAPTCHA)
-pkill -f "Brave Browser"
+pkill -f "Google Chrome"   # or "Brave Browser" depending on CHROME_PATH
 rm -rf chrome-profile/
-npm run chrome
+npm run start              # patchright re-creates the profile on next request
 ```
 or wait 24–48 hours for Google's flag to expire.
 
@@ -107,11 +113,8 @@ Normal — Lighthouse runs throttled network simulations. Big sites can take 90s
 # Type-check the code
 npm run typecheck
 
-# CDP smoke test (verifies Playwright can talk to the browser)
+# Smoke test (verifies patchright can launch + reach example.com)
 npm run smoke
-
-# See open Brave tabs (helpful for debugging tab leaks)
-curl -s http://127.0.0.1:9222/json | python3 -c "import json,sys; [print(t.get('type'),'|',t.get('url','')[:80]) for t in json.load(sys.stdin)]"
 
 # Tail the latest CSV
 ls -t data/*.csv | head -1 | xargs head -20

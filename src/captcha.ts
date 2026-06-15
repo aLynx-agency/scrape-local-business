@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 
 const API_BASE = "https://2captcha.com";
 const POLL_INTERVAL_MS = 5_000;

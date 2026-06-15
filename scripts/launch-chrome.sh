@@ -53,14 +53,16 @@ if [[ "${HEADLESS:-false}" == "true" ]]; then
   HEADLESS_FLAGS="--headless=new --disable-gpu --window-size=1366,900"
 fi
 
-# Chrome refuses to start as root unless --no-sandbox is set. The proper fix is
-# a non-root user, but on single-purpose VPS deployments running as root is
-# common — auto-add the flag with a warning rather than crashing. Set
-# ALLOW_NO_SANDBOX=false to opt out and force a non-root user.
-SANDBOX_FLAGS=""
-if [[ "$(id -u)" == "0" && "${ALLOW_NO_SANDBOX:-true}" == "true" ]]; then
-  echo "WARN: running Chrome as root — adding --no-sandbox. Prefer a non-root user." >&2
-  SANDBOX_FLAGS="--no-sandbox"
+# Chrome refuses to start as root without --no-sandbox. We do NOT auto-add
+# that flag — it disables Chrome's site isolation sandbox, a real security
+# weakening that Chrome itself warns against. On prod servers, run this under
+# a non-root user (the systemd units in SERVER_SETUP.md assume one). If you
+# hit "Running as root without --no-sandbox is not supported", create a
+# dedicated user and re-run.
+if [[ "$(id -u)" == "0" ]]; then
+  echo "ERROR: refusing to launch Chrome as root — create a non-root user." >&2
+  echo "       Chrome's --no-sandbox flag disables site isolation; we don't ship it." >&2
+  exit 1
 fi
 
 # Optional outbound proxy. For datacenter IPs (AWS/GCP/DO/Hetzner/etc.) Google
@@ -95,6 +97,5 @@ exec "$CHROME_PATH" \
   --no-default-browser-check \
   --disable-features=BraveRewards,BraveWallet,BraveAds,BraveTor \
   $HEADLESS_FLAGS \
-  $SANDBOX_FLAGS \
   $STEALTH_FLAGS \
   $PROXY_FLAGS

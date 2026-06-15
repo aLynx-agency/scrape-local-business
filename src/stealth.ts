@@ -1,3 +1,16 @@
+// DISABLED on patch branch.
+//
+// Patchright now handles automation fingerprint patches at the CDP/C++ layer
+// (navigator.webdriver, chrome.runtime, plugins, Runtime.enable traces, etc).
+// JS-shim stealth is itself detectable — sites probe for descriptor accessors
+// that don't match a real browser. Patchright's native patches don't have that
+// problem.
+//
+// This file is kept (not deleted) as a rollback path: if patchright proves
+// insufficient on Google specifically, re-import STEALTH_INIT_SCRIPT in
+// chrome.ts and re-add `context.addInitScript({ content: STEALTH_INIT_SCRIPT })`.
+//
+// Original docstring:
 // Browser fingerprint shim — runs in every page before site JS executes.
 //
 // Patches the headless tells that Google's BotGuard reads first. With a

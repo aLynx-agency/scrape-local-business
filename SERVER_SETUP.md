@@ -257,7 +257,10 @@ sudo systemctl restart serp-chrome.service
 ## Troubleshooting
 
 **`Running as root without --no-sandbox is not supported`**
-You're launching Chrome as the root user. The launcher auto-adds `--no-sandbox` when it detects UID 0, so just pull the latest `scripts/launch-chrome.sh` (or set `ALLOW_NO_SANDBOX=true` explicitly). Better: create a non-root user, `chown -R` the project to them, and run as that user — that's the configuration the systemd units in §7 assume.
+You're launching Chrome as the root user. We do **not** ship `--no-sandbox` —
+it disables Chrome's site isolation sandbox, a real security weakening. Create
+a non-root user, `chown -R` the project to them, and run as that user. The
+systemd units in §7 already assume a dedicated `serp` user.
 
 **`chromeConnected:false` from `/health`**
 Chrome unit isn't up. `systemctl status serp-chrome` and `journalctl -u serp-chrome -n 100`. Common cause: missing system lib — re-run the apt deps from §1.

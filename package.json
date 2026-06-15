@@ -16,7 +16,7 @@
   "dependencies": {
     "fastify": "^5.0.0",
     "lighthouse": "^13.2.0",
-    "playwright": "^1.48.0",
+    "patchright": "^1.60.2",
     "proxy-chain": "^2.5.0"
   },
   "devDependencies": {

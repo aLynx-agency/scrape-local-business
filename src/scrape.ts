@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 import { closeOpenedPages, connect } from "./chrome.ts";
 import { writeCsv } from "./csv.ts";
 import { findEmailsConcurrent } from "./email.ts";
@@ -11,15 +11,15 @@ import type { ScrapeResponse, SerpResult } from "./types.ts";
 const SCREENSHOT_DIR = "screenshots";
 const DATA_DIR = "data";
 
-// Realistic desktop viewports (Mac/PC popular sizes, 2024 web stats). A fixed
-// 1366×900 is itself a soft tell; we randomize per scrape so consecutive
-// requests don't look like the same automated session.
-const VIEWPORTS = [
-  { width: 1366, height: 768 },
-  { width: 1440, height: 900 },
-  { width: 1536, height: 864 },
-  { width: 1920, height: 1080 },
-] as const;
+// DISABLED on patch branch: viewport randomization. Patchright launches with
+// viewport:null = real OS window size, which is more realistic than any fixed
+// list. Re-enable if we observe fingerprint-clustering across scrapes.
+// const VIEWPORTS = [
+//   { width: 1366, height: 768 },
+//   { width: 1440, height: 900 },
+//   { width: 1536, height: 864 },
+//   { width: 1920, height: 1080 },
+// ] as const;
 
 // Google Local Finder serves 10 results per page (was 20 in older layouts).
 // `start` is a 0-based row offset, so page N's URL gets start = N * 10. With
@@ -34,21 +34,20 @@ export async function scrape(query: string, maxPages = 5): Promise<ScrapeRespons
   const page = await context.newPage();
 
   try {
-    const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
-    await page.setViewportSize(viewport);
-    console.log(`[scrape] viewport: ${viewport.width}x${viewport.height}`);
-
-    // Pin browser timezone to Brussels — matches the proxy's Belgian exit and
-    // the Belgian locale we claim. Playwright's `page.emulateTimezone` isn't
-    // available on contexts attached via connectOverCDP, so we send the raw
-    // CDP command. If the server is on UTC and we don't do this, the browser
-    // reports UTC even though it claims Belgian locale — a mismatch flag.
-    try {
-      const cdp = await page.context().newCDPSession(page);
-      await cdp.send("Emulation.setTimezoneOverride", { timezoneId: "Europe/Brussels" });
-    } catch (e) {
-      console.warn(`[scrape] timezone override failed: ${(e as Error).message}`);
-    }
+    // DISABLED on patch branch: viewport randomization + timezone override.
+    // Patchright handles these via launch args (viewport:null = OS size, real
+    // system timezone). Re-add per-scrape variation only if we see clustering.
+    //
+    // const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+    // await page.setViewportSize(viewport);
+    // console.log(`[scrape] viewport: ${viewport.width}x${viewport.height}`);
+    //
+    // try {
+    //   const cdp = await page.context().newCDPSession(page);
+    //   await cdp.send("Emulation.setTimezoneOverride", { timezoneId: "Europe/Brussels" });
+    // } catch (e) {
+    //   console.warn(`[scrape] timezone override failed: ${(e as Error).message}`);
+    // }
 
     await mkdir(SCREENSHOT_DIR, { recursive: true });
     await mkdir(DATA_DIR, { recursive: true });

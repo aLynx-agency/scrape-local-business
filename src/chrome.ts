@@ -1,60 +1,81 @@
-import { chromium, type Browser, type BrowserContext } from "playwright";
-import { STEALTH_INIT_SCRIPT } from "./stealth.ts";
+import { chromium, type Browser, type BrowserContext } from "patchright";
 
-const CDP_PORT = process.env.CDP_PORT ?? "9222";
-// Use 127.0.0.1 explicitly — `localhost` resolves to ::1 (IPv6) first on Node 20+
-// while Chrome's --remote-debugging-port only listens on IPv4 by default.
-const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+// Patchright = Playwright fork that patches automation fingerprints at the
+// CDP/C++ layer (navigator.webdriver, chrome.runtime, Runtime.enable traces,
+// etc). Replaces the custom STEALTH_INIT_SCRIPT we used to ship — JS-shim
+// stealth is itself detectable, native patches are not.
+//
+// We launch our own persistent context now instead of connecting over CDP to
+// a user-launched Chrome. Patchright's biggest wins are at launch (removing
+// --enable-automation, hiding CDP flags, channel:'chrome' uses the real
+// Google Chrome binary). connectOverCDP would skip half the patches.
 
-let cached: { browser: Browser; context: BrowserContext } | null = null;
+const USER_DATA_DIR = process.env.USER_DATA_DIR ?? "./chrome-profile";
+const HEADLESS = process.env.HEADLESS === "true";
+const CHROME_PATH = process.env.CHROME_PATH;
+const PROXY_SERVER = process.env.PROXY_SERVER;
+
+// Belgium locale stack. Every layer below must agree or the mismatch is itself
+// a fingerprint signal:
+//   - timezone: Europe/Brussels
+//   - locale (Accept-Language + navigator.language): en-BE
+//   - geolocation: Brussels city center
+//   - navigator.languages preference chain: en-BE → en → nl-BE → fr-BE
+// Coordinates from Brussels Grand Place. Granted to google.com so Local Finder
+// can read them without a permission prompt.
+const BRUSSELS_LAT = 50.8503;
+const BRUSSELS_LON = 4.3517;
+const LOCALE = "en-BE";
+const TIMEZONE = "Europe/Brussels";
+const ACCEPT_LANGUAGE_CHAIN = "en-BE,en;q=0.9,nl-BE;q=0.8,fr-BE;q=0.7";
+
+let cached: { context: BrowserContext } | null = null;
 
 export async function connect(): Promise<{ browser: Browser; context: BrowserContext }> {
-  if (cached && cached.browser.isConnected()) return cached;
-
-  if (!(await isReachable())) {
-    throw new Error(
-      `Browser CDP not reachable at ${CDP_URL}. Start the browser first with \`npm run chrome\` (or \`HEADLESS=true npm run chrome\`).`,
-    );
+  if (cached) {
+    const browser = cached.context.browser();
+    if (browser?.isConnected()) return { browser, context: cached.context };
+    cached = null;
   }
 
-  const browser = await chromium.connectOverCDP(CDP_URL);
-  // When connecting over CDP, the existing default context is reused.
-  const contexts = browser.contexts();
-  const context = contexts[0] ?? (await browser.newContext());
-
-  // tsx transforms named functions/arrows in our source with `__name(fn, "name")`
-  // calls. When that code runs inside `page.evaluate` it executes in the browser,
-  // where `__name` is undefined. Shim it once per context via init script.
-  await context.addInitScript({ content: "globalThis.__name = globalThis.__name || function(fn){return fn;};" });
-
-  // Anti-fingerprint shim — patches navigator.webdriver, plugins, languages,
-  // chrome.runtime, WebGL renderer, etc. before any site JS runs. Required for
-  // Google scraping past the first request, even with a residential proxy.
-  await context.addInitScript({ content: STEALTH_INIT_SCRIPT });
-
-  // Locale alignment for Belgian outreach queries: Accept-Language matches
-  // navigator.languages from the stealth shim, geolocation pinned to Brussels.
-  // Mismatch between any of (proxy country, Accept-Language, navigator.languages,
-  // geolocation, timezone) is itself a fingerprint signal — Google flags
-  // "browser claims US locale but exits via Belgian residential IP" inside
-  // its first request.
-  await context.setExtraHTTPHeaders({
-    "Accept-Language": "en-BE,en;q=0.9,nl-BE;q=0.8,fr-BE;q=0.7",
+  const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
+    // Prefer explicit binary path (Mac dev = Brave, Ubuntu prod = Chrome). Fall
+    // back to channel:'chrome' which looks up Google Chrome from PATH.
+    ...(CHROME_PATH ? { executablePath: CHROME_PATH } : { channel: "chrome" }),
+    headless: HEADLESS,
+    // viewport: null = use the actual OS window size instead of Playwright's
+    // 1280x720 default. A 1280x720 viewport on a 2560x1440 display is itself
+    // a bot tell.
+    viewport: null,
+    proxy: PROXY_SERVER ? { server: PROXY_SERVER } : undefined,
+    locale: LOCALE,
+    timezoneId: TIMEZONE,
+    geolocation: { latitude: BRUSSELS_LAT, longitude: BRUSSELS_LON },
+    permissions: ["geolocation"],
+    args: [
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-features=BraveRewards,BraveWallet,BraveAds,BraveTor",
+    ],
   });
-  // Brussels city center coordinates. Granted to google.com so any geolocation
-  // probe (Local Finder uses these) returns plausible Belgian coords instead
-  // of "permission denied" or default 0,0.
-  await context.setGeolocation({ latitude: 50.8503, longitude: 4.3517 });
-  await context.grantPermissions(["geolocation"], { origin: "https://www.google.com" });
 
-  cached = { browser, context };
-  return cached;
+  // Override the single-locale Accept-Language patchright sets from `locale` with
+  // a richer multi-locale preference chain. Belgian users typically have all
+  // four locales configured in their OS, and a single `en-BE` is itself a soft
+  // signal of a synthetic profile.
+  await context.setExtraHTTPHeaders({ "Accept-Language": ACCEPT_LANGUAGE_CHAIN });
+
+  cached = { context };
+  return { browser: context.browser()!, context };
 }
 
+// Backwards compat for /health endpoint + smoke test. Patchright launches its
+// own browser so reachability is always true once connect() succeeds. We
+// attempt a lightweight connect to detect launch failures early.
 export async function isReachable(): Promise<boolean> {
   try {
-    const res = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(1500) });
-    return res.ok;
+    await connect();
+    return true;
   } catch {
     return false;
   }
